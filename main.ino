@@ -1,42 +1,65 @@
 // ============================================================
-//  Monitor Calidad del Aire
-//  ESP32 + NovaPM 5006 (SDS011-compatible) + DHT22
-//  Crea un Access Point WiFi y sirve dashboard con gráficos históricos
+//  Monitor Calidad del Aire - ESP32
+//  NovaPM (SDS011) + DHT22 + LCD 16x2 Animaciones Suaves + LED RGB (ICAP)
 // ============================================================
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DHT.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 
-// ---- Pines ----
-#define DHT_PIN    2        // GPI2 conectado al DATA del DHT11
-#define DHT_TYPE   DHT11
+// ---- Pines Sensores ----
+#define DHT_PIN    4        // GPIO 4 (seguro para bootloader)
+#define DHT_TYPE   DHT22
 
 #define PM_RX_PIN  16       // GPIO RX2 ← TX del sensor NovaPM
-#define PM_TX_PIN  17       // GPIO TX2 → RX del sensor NovaPM (opcional)
+#define PM_TX_PIN  17       // GPIO TX2 → RX del sensor NovaPM
+
+// ---- Pines I2C (LCD) ----
+#define I2C_SDA    21       // GPIO 21
+#define I2C_SCL    22       // GPIO 22
+
+// ---- Pines LED RGB (Cátodo común) ----
+#define PIN_R      25       // GPIO 25
+#define PIN_G      26       // GPIO 26
+#define PIN_B      27       // GPIO 27
 
 // ---- Credenciales del AP ----
 const char* AP_SSID = "SensorAire";
-const char* AP_PASS = "12345678";   // mínimo 8 caracteres
+const char* AP_PASS = "12345678";
 
 // ---- Instancias ----
-DHT       dht(DHT_PIN, DHT_TYPE);
+DHT dht(DHT_PIN, DHT_TYPE);
 WebServer server(80);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // ---- Variables de lectura ----
 float currentTemp = 0.0f, currentHum = 0.0f;
 float currentPM25 = 0.0f, currentPM10 = 0.0f;
 
 unsigned long lastDHTread = 0;
-const unsigned long DHT_INTERVAL = 2000;   // ms
+const unsigned long DHT_INTERVAL = 2000;
 
-// ---- Parser no-bloqueante NovaPM (protocolo SDS011) ----
-// Trama: AA C0 [P2.5L][P2.5H][P10L][P10H][IDL][IDH][CHK] AB
+// Variables de rotación y animación fluida LCD
+unsigned long lastScreenChange = 0;
+unsigned long lastAnimTick = 0;
+int currentScreen = 0;
+int typewriterIndex = 0;
+int animStep = 0;
+
+// Caracteres personalizados
+byte wifiSignalChar[8] = {
+  0b00000, 0b00001, 0b00001, 0b00101,
+  0b00101, 0b10101, 0b10101, 0b00000
+};
+
+// ---- Parser NovaPM SDS011 ----
 static uint8_t pmBuf[10];
 static uint8_t pmIdx = 0;
 
 void processPMByte(uint8_t b) {
-  if (pmIdx == 0 && b != 0xAA) return;   // esperar cabecera
+  if (pmIdx == 0 && b != 0xAA) return;
   pmBuf[pmIdx++] = b;
   if (pmIdx < 10) return;
   pmIdx = 0;
@@ -51,8 +74,126 @@ void processPMByte(uint8_t b) {
   currentPM10 = (pmBuf[5] * 256 + pmBuf[4]) / 10.0f;
 }
 
+// ---- Control de LED RGB ----
+void setRGB(int r, int g, int b) {
+  analogWrite(PIN_R, r);
+  analogWrite(PIN_G, g);
+  analogWrite(PIN_B, b);
+}
+
+int getNivelICAP(float pm25, float pm10) {
+  int lvl25 = 0, lvl10 = 0;
+  if      (pm25 <= 25)  lvl25 = 0;
+  else if (pm25 <= 50)  lvl25 = 1;
+  else if (pm25 <= 110) lvl25 = 2;
+  else if (pm25 <= 170) lvl25 = 3;
+  else                  lvl25 = 4;
+
+  if      (pm10 <= 75)  lvl10 = 0;
+  else if (pm10 <= 150) lvl10 = 1;
+  else if (pm10 <= 250) lvl10 = 2;
+  else if (pm10 <= 330) lvl10 = 3;
+  else                  lvl10 = 4;
+
+  return max(lvl25, lvl10);
+}
+
+void actualizarSemaforoRGB(int nivel) {
+  switch (nivel) {
+    case 0: setRGB(0, 255, 0);   break; // Verde: Buena
+    case 1: setRGB(255, 200, 0); break; // Amarillo: Regular
+    case 2: setRGB(255, 60, 0);  break; // Naranja: Alerta
+    case 3: setRGB(255, 0, 0);   break; // Rojo: Pre-emergencia
+    case 4: setRGB(180, 0, 255); break; // Violeta/Morado: Emergencia
+  }
+}
+
+// ---- Renderizado del LCD con Efectos ----
+void renderLCD() {
+  int connectedClients = WiFi.softAPgetStationNum();
+
+  switch (currentScreen) {
+    case 0: {
+      // Pantalla 0: Letra por letra SANTO (arriba) y TOMAS (abajo)
+      const String txt1 = "SANTO";
+      const String txt2 = "TOMAS";
+      
+      lcd.setCursor(5, 0);
+      if (typewriterIndex <= txt1.length()) {
+        lcd.print(txt1.substring(0, typewriterIndex));
+      } else {
+        lcd.print(txt1);
+      }
+
+      lcd.setCursor(5, 1);
+      if (typewriterIndex > txt1.length()) {
+        int idx2 = typewriterIndex - txt1.length();
+        lcd.print(txt2.substring(0, min(idx2, (int)txt2.length())));
+      }
+      break;
+    }
+
+    case 1: {
+      // Pantalla 1: INFORMATICA (letra por letra) + ESTACION AIRE animado
+      const String txtInfo = "INFORMATICA";
+      lcd.setCursor(2, 0);
+      lcd.print(txtInfo.substring(0, min(typewriterIndex, (int)txtInfo.length())));
+
+      // Animación inferior para "ESTACION AIRE" con efecto de pulsación
+      lcd.setCursor(0, 1);
+      if ((animStep % 4) == 0) {
+        lcd.print("< ESTACION AIRE>");
+      } else if ((animStep % 4) == 2) {
+        lcd.print("> ESTACION AIRE<");
+      } else {
+        lcd.print("  ESTACION AIRE ");
+      }
+      break;
+    }
+
+    case 2:
+      // Pantalla 2: Material Particulado
+      lcd.setCursor(0, 0);
+      lcd.print("PM2.5: " + String(currentPM25, 1) + " ug ");
+      lcd.setCursor(0, 1);
+      lcd.print("PM10 : " + String(currentPM10, 1) + " ug ");
+      break;
+
+    case 3:
+      // Pantalla 3: Temperatura y Humedad
+      lcd.setCursor(0, 0);
+      lcd.print("Temp: " + String(currentTemp, 1) + " " + (char)223 + "C    ");
+      lcd.setCursor(0, 1);
+      lcd.print("Hum : " + String(currentHum, 1) + " %     ");
+      break;
+
+    case 4:
+      // Pantalla 4: Credenciales WiFi
+      lcd.setCursor(0, 0);
+      lcd.print("RED : SensorAire");
+      lcd.setCursor(0, 1);
+      lcd.print("PASS: 12345678  ");
+      break;
+
+    case 5:
+      // Pantalla 5: IP y Conectados
+      lcd.setCursor(0, 0);
+      lcd.print("IP: 192.168.4.1 ");
+      lcd.setCursor(0, 1);
+      lcd.print("Clientes: ");
+      lcd.print(connectedClients);
+      lcd.print("  ");
+      if ((animStep % 2) == 0) {
+        lcd.write(1); // Ícono WiFi
+      } else {
+        lcd.print(" ");
+      }
+      break;
+  }
+}
+
 // ============================================================
-//  Página web autocontenida (sin CDN ni librerías externas)
+//  Página web autocontenida
 // ============================================================
 static const char HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -89,7 +230,7 @@ canvas{display:block;width:100%;height:200px}
 <body>
 <header>
   <h1>Monitor Calidad del Aire</h1>
-  <p>ESP32 &middot; NovaPM 5006 &middot; DHT11</p>
+  <p>Santo Tomás &middot; NovaPM 5006 &middot; DHT22</p>
 </header>
 <div class="cards">
   <div class="card"><div class="lbl">Temperatura</div><div class="val ct" id="T">--</div><div class="unt">°C</div></div>
@@ -112,7 +253,6 @@ canvas{display:block;width:100%;height:200px}
 <div id="st">Conectando...</div>
 
 <script>
-// ---- Gráfico canvas sin librerías externas ----
 function MiniChart(id, series) {
   var cv = document.getElementById(id);
   var cx = cv.getContext('2d');
@@ -153,11 +293,9 @@ function MiniChart(id, series) {
     function tx(i){ return PL + (N > 1 ? i / (N - 1) : 0.5) * pw; }
     function ty(v){ return PT + (1 - (v - mn) / rng) * ph; }
 
-    // Fondo
     cx.fillStyle = '#1a1d27';
     cx.fillRect(0, 0, W, H);
 
-    // Grid horizontal
     for (var k = 0; k <= 4; k++) {
       var gy = PT + k / 4 * ph;
       cx.strokeStyle = '#2a2d3e'; cx.lineWidth = 1;
@@ -166,14 +304,12 @@ function MiniChart(id, series) {
       cx.fillText((mx - k / 4 * rng).toFixed(1), PL - 3, gy + 4);
     }
 
-    // Etiquetas eje X
     cx.fillStyle = '#555'; cx.font = '9px sans-serif'; cx.textAlign = 'center';
     [0, 0.33, 0.66, 1].forEach(function(f){
       var i = Math.round(f * (N - 1));
       if (lb[i]) cx.fillText(lb[i], tx(i), H - 6);
     });
 
-    // Líneas de cada serie
     series.forEach(function(s, si){
       if (data[si].length < 2) return;
       cx.strokeStyle = s.color; cx.lineWidth = 2;
@@ -182,7 +318,6 @@ function MiniChart(id, series) {
         i === 0 ? cx.moveTo(tx(i), ty(v)) : cx.lineTo(tx(i), ty(v));
       });
       cx.stroke();
-      // Leyenda
       var lx = PL + si * 160;
       cx.fillStyle = s.color;
       cx.fillRect(lx, 6, 12, 10);
@@ -220,8 +355,6 @@ function tick() {
     });
 }
 
-// ---- Indice ICAP Chile ----
-// Umbrales basados en PM2.5 y PM10 (ug/m3, lectura instantanea)
 var ICAP = [
   { label: 'Buena',          dot: '#43a047', color: '#66bb6a', bg: '#0d1f0e', border: '#2e7d32',
     desc: 'Calidad del aire satisfactoria. No representa riesgo para la salud de la poblacion general.' },
@@ -236,7 +369,6 @@ var ICAP = [
 ];
 
 function getICAP(pm25, pm10) {
-  // Nivel segun el peor de los dos contaminantes
   var lvl25, lvl10;
   if      (pm25 <= 25)  lvl25 = 0;
   else if (pm25 <= 50)  lvl25 = 1;
@@ -260,7 +392,7 @@ function updateICAP(pm25, pm10) {
   var lbl   = document.getElementById('aqiLabel');
   var desc  = document.getElementById('aqiDesc');
   box.style.background   = nivel.bg;
-  box.style.borderColor  = nivel.border;
+  box.style.borderColor = nivel.border;
   dot.style.background   = nivel.dot;
   lbl.style.color        = nivel.color;
   lbl.textContent        = nivel.label;
@@ -300,57 +432,76 @@ void handleData() {
 void setup() {
   Serial.begin(115200);
 
+  // Inicializar pines del LED RGB
+  pinMode(PIN_R, OUTPUT);
+  pinMode(PIN_G, OUTPUT);
+  pinMode(PIN_B, OUTPUT);
+  setRGB(0, 0, 0);
+
+  // Inicializar bus I2C y LCD
+  Wire.begin(I2C_SDA, I2C_SCL);
+  lcd.init();
+  lcd.backlight();
+  lcd.createChar(1, wifiSignalChar);
+
   // Serial2 → sensor NovaPM a 9600 baud
   Serial2.begin(9600, SERIAL_8N1, PM_RX_PIN, PM_TX_PIN);
 
   dht.begin();
 
-  // ---- Diagnóstico DHT22 al arrancar ----
-  delay(2000);   // El DHT22 necesita ~2 s para estabilizarse
-  float testT = dht.readTemperature(false);   // false = Celsius
-  float testH = dht.readHumidity();
-  if (isnan(testT) || isnan(testH)) {
-    Serial.println(F("DHT22 → ERROR: verifica cableado y resistencia pull-up 10kΩ entre DATA y VCC"));
-  } else {
-    Serial.printf("DHT22 OK → T: %.1f°C  H: %.1f%%\n", testT, testH);
-  }
-
-  // Crear Access Point
+  // Crear Access Point WiFi
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
   Serial.print(F("AP creado. IP: "));
-  Serial.println(WiFi.softAPIP());   // normalmente 192.168.4.1
+  Serial.println(WiFi.softAPIP());
 
   server.on("/",     HTTP_GET, handleRoot);
   server.on("/data", HTTP_GET, handleData);
   server.begin();
   Serial.println(F("Servidor HTTP iniciado"));
+
+  actualizarSemaforoRGB(0);
 }
 
 // ============================================================
 //  Loop
 // ============================================================
 void loop() {
-  // Procesar bytes del sensor PM de forma no bloqueante
+  unsigned long now = millis();
+
+  // 1. Parser NovaPM
   while (Serial2.available()) {
     processPMByte((uint8_t)Serial2.read());
   }
 
-  // Atender clientes web
+  // 2. Servidor Web
   server.handleClient();
 
-  // Leer DHT22 cada DHT_INTERVAL ms
-  unsigned long now = millis();
+  // 3. Lectura periódica DHT22
   if (now - lastDHTread >= DHT_INTERVAL) {
     lastDHTread = now;
-    // readTemperature(false) → Celsius  |  readTemperature(true) → Fahrenheit
     float t = dht.readTemperature(false);
-    // Si tu sensor entregara Fahrenheit usa esta línea en su lugar:
-    // float t = (dht.readTemperature(true) - 32.0f) * 5.0f / 9.0f;
     float h = dht.readHumidity();
     if (!isnan(t)) currentTemp = t;
     if (!isnan(h)) currentHum  = h;
-    Serial.printf("T: %.1f°C  H: %.1f%%  PM2.5: %.1f  PM10: %.1f μg/m³\n",
-                  currentTemp, currentHum, currentPM25, currentPM10);
+
+    int nivel = getNivelICAP(currentPM25, currentPM10);
+    actualizarSemaforoRGB(nivel);
+  }
+
+  // 4. Temporizador de animación suave (cada 150 ms añade una letra o paso)
+  if (now - lastAnimTick >= 150) {
+    lastAnimTick = now;
+    typewriterIndex++;
+    animStep++;
+    renderLCD();
+  }
+
+  // 5. Rotación de pantallas principales cada 5 segundos (5000 ms)
+  if (now - lastScreenChange >= 5000) {
+    lastScreenChange = now;
+    currentScreen = (currentScreen + 1) % 6; // Rota entre 0 y 5
+    typewriterIndex = 0;                     // Reiniciar el contador de máquina de escribir
+    lcd.clear();
   }
 }
