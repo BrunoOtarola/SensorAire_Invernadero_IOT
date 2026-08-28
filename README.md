@@ -91,10 +91,7 @@ https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32
 
 ```
 ESP32 3V3  ----+---- VCC del DHT11
-               |
-             10 kOhm  (pull-up, omitir si es breakout de 3 pines)
-               |
-ESP32 GPIO 2 --+---- DATA del DHT11
+ESP32 GPIO 4 --+---- DATA del DHT11
 ESP32 GND  --------- GND del DHT11
 ```
 
@@ -106,8 +103,8 @@ ESP32 GND  --------- GND del DHT11
 ESP32 VIN (5V) ---- VCC del NovaPM   (pin 1 / cable rojo)
 ESP32 GND      ---- GND del NovaPM   (pin 2 / cable negro)
                     (pin 3 sin conexion)
-ESP32 GPIO 16  ---- TX del NovaPM    (pin 4 / cable verde)
-ESP32 GPIO 17  ---- RX del NovaPM    (pin 5 / cable azul)  <- opcional
+ESP32 GPIO 16 o RX2  ---- TX del NovaPM    (pin 4 / cable verde)
+ESP32 GPIO 17 o TX2 ---- RX del NovaPM    (pin 5 / cable azul)  <- opcional
 ```
 
 > El sensor requiere 5 V para alimentar su ventilador interno y su laser. El pin VIN del ESP32 proporciona el voltaje USB sin pasar por el regulador interno.
@@ -130,7 +127,7 @@ Los parametros configurables se encuentran al inicio del archivo `main.ino`:
 
 ```cpp
 // Pin y tipo de sensor de temperatura/humedad
-#define DHT_PIN    2
+#define DHT_PIN    4
 #define DHT_TYPE   DHT11
 
 // Pines UART para el sensor NovaPM
