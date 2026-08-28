@@ -40,11 +40,11 @@ Los valores se actualizan automaticamente cada 2 segundos mediante peticiones AJ
 
 | Componente | Modelo | Cantidad |
 |---|---|---|
-| Microcontrolador | ESP32 (cualquier variante con Serial2) | 1 |
+| Microcontrolador | ESP32 XX | 1 |
 | Sensor de temperatura y humedad | DHT11 | 1 |
 | Sensor de material particulado | NovaPM 5006 (SDS011-compatible) | 1 |
-| Resistencia pull-up | 10 kOhm | 1 |
 | Cable USB | Con datos (no solo carga) | 1 |
+| LED RGB | LED RGB | 1 |
 | Fuente de alimentacion | 5 V / min. 500 mA | 1 |
 
 ### Notas sobre el hardware
@@ -361,14 +361,15 @@ El firmware valida cabecera (`0xAA`), identificador (`0xC0`), cola (`0xAB`) y ch
 
 ### DHT11 muestra ERROR en el Monitor Serie
 
-- Verificar que el pin DATA este conectado a GPIO 2.
+- Verificar que el pin DATA este conectado a GPIO 2 o D2. 
 - Verificar la resistencia pull-up de 10 kOhm entre DATA y VCC (si es sensor de 4 pines suelto).
 - Verificar que la alimentacion sea de 3.3 V y no de 5 V.
 - Reemplazar el sensor si el problema persiste.
 
 ### PM2.5 y PM10 muestran 0.0 permanentemente
 
-- Verificar que el pin TX del sensor este conectado a GPIO 16 del ESP32.
+- Verificar que el pin TX del sensor este conectado a GPIO 16 o RX2 del ESP32.
+- Verificar que el pin RX del sensor este conectado a GPIO 17 o TX2 del ESP32.
 - Verificar que el sensor este alimentado con 5 V (pin VIN del ESP32).
 - Escuchar el ventilador interno del sensor al encender: si no gira, el problema es de alimentacion.
 - Esperar al menos 15 segundos tras el arranque antes de descartar lecturas.
